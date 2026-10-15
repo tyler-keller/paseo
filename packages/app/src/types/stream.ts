@@ -714,6 +714,16 @@ export interface AssistantMessageItem {
   /** Display-only fields, assigned after source-item plugin transforms. */
   blockGroupId?: string;
   blockIndex?: number;
+  renderCap?: AssistantMessageRenderCap;
+}
+
+/**
+ * Set on the last row of a message that passed the render cap. That row holds the rest of
+ * the message but renders only its first `characters`, and reports the whole message size.
+ */
+export interface AssistantMessageRenderCap {
+  characters: number;
+  messageBytes: number;
 }
 
 export interface TimelinePosition {

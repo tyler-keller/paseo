@@ -59,7 +59,12 @@ import Animated, {
 import Svg, { Defs, LinearGradient as SvgLinearGradient, Rect, Stop } from "react-native-svg";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { MarkdownRenderer, type MarkdownStyles } from "@/components/markdown/renderer";
-import type { TaskActivity, TodoEntry, UserMessageImageAttachment } from "@/types/stream";
+import type {
+  AssistantMessageRenderCap,
+  TaskActivity,
+  TodoEntry,
+  UserMessageImageAttachment,
+} from "@/types/stream";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
 import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
 import { buildToolCallPresentation } from "@/tool-calls/presentation";
@@ -761,6 +766,7 @@ interface AssistantMessageProps {
   client?: DaemonClient | null;
   spacing?: "default" | "compactTop" | "compactBottom" | "compactBoth";
   phase: MarkdownPhase;
+  renderCap?: AssistantMessageRenderCap;
 }
 
 export const assistantMessageStylesheet = StyleSheet.create((theme) => ({
@@ -1493,6 +1499,12 @@ function MarkdownListView({
   );
 }
 
+// Every Markdown block of a reply renders as its own AssistantMessage row, so per-instance
+// parsers multiply: each linkify-enabled MarkdownIt compiles ~200 KB of regex source.
+// Parsing keeps its state in per-call objects, so one pair serves every row.
+const markdownParser = createAssistantMarkdownParser();
+const streamingMarkdownParser = createAssistantMarkdownParser({ streaming: true });
+
 export const AssistantMessage = memo(function AssistantMessage({
   renderFullContent = false,
   occurrenceKey,
@@ -1503,23 +1515,24 @@ export const AssistantMessage = memo(function AssistantMessage({
   client,
   spacing = "default",
   phase,
+  renderCap,
 }: AssistantMessageProps) {
   const { t } = useTranslation();
-  const markdownParser = useMemo(createAssistantMarkdownParser, []);
-  const streamingMarkdownParser = useMemo(
-    () => createAssistantMarkdownParser({ streaming: true }),
-    [],
-  );
   const renderedMessage = useMemo(
     () =>
-      renderFullContent ? { text: message, capped: false } : capAssistantMessageForRender(message),
-    [message, renderFullContent],
+      renderFullContent
+        ? { text: message, capped: false }
+        : capAssistantMessageForRender(message, renderCap?.characters),
+    [message, renderCap?.characters, renderFullContent],
   );
   const revealedText = useRevealedText(renderedMessage.text, phase);
   const revealedMessage = renderFullContent ? renderedMessage.text : revealedText;
   const fullMessageByteLength = useMemo(
-    () => (renderedMessage.capped && phase === "complete" ? getUtf8ByteLength(message) : null),
-    [message, phase, renderedMessage.capped],
+    () =>
+      renderedMessage.capped && phase === "complete"
+        ? (renderCap?.messageBytes ?? getUtf8ByteLength(message))
+        : null,
+    [message, phase, renderCap?.messageBytes, renderedMessage.capped],
   );
 
   const fileLinkActions = useAssistantFileLinkActions();
@@ -1957,7 +1970,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         );
       },
     };
-  }, [client, fileLinkActions, markdownParser, occurrenceKey, phase, serverId, workspaceRoot]);
+  }, [client, fileLinkActions, occurrenceKey, phase, serverId, workspaceRoot]);
 
   const blocks = useMemo(() => splitMarkdownBlocks(revealedMessage), [revealedMessage]);
   const keyedBlocks = useMemo(

@@ -36,12 +36,15 @@ export function getUtf8ByteLength(message: string): number {
   return bytes;
 }
 
-export function capAssistantMessageForRender(message: string): CappedAssistantMessage {
-  if (message.length <= ASSISTANT_MESSAGE_RENDER_CHARACTER_LIMIT) {
+export function capAssistantMessageForRender(
+  message: string,
+  limit = ASSISTANT_MESSAGE_RENDER_CHARACTER_LIMIT,
+): CappedAssistantMessage {
+  if (message.length <= limit) {
     return { text: message, capped: false };
   }
 
-  let end = ASSISTANT_MESSAGE_RENDER_CHARACTER_LIMIT;
+  let end = limit;
   if (graphemeSegmenter) {
     end = graphemeSegmenter.segment(message).containing(end)!.index;
   } else {

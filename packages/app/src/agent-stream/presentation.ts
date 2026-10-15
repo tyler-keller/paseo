@@ -1,7 +1,17 @@
-import type { AssistantMessageItem, StreamItem, UserMessageItem } from "@/types/stream";
+import type {
+  AssistantMessageItem,
+  AssistantMessageRenderCap,
+  StreamItem,
+  UserMessageItem,
+} from "@/types/stream";
 import type { TimelineItemTransform } from "@/plugins/timeline/model";
 import { projectPluginTimelineItems } from "@/plugins/timeline/projection";
 import { splitMarkdownBlocks } from "@/utils/split-markdown-blocks";
+import {
+  capAssistantMessageForRender,
+  getUtf8ByteLength,
+  type CappedAssistantMessage,
+} from "@/components/assistant-message-render-limit";
 import {
   prepareToolCallHistory,
   projectToolCallDetailLevel,
@@ -42,14 +52,41 @@ export function getStreamItemMessageId(item: StreamItem): string {
  * through the row — a reused block carrying a pre-canonical cursor reports a stale
  * reading position and weakens fork-boundary resolution.
  */
-function isReusableBlock(block: AssistantMessageItem, source: AssistantMessageItem, id: string) {
+function isReusableBlock(
+  block: AssistantMessageItem,
+  source: AssistantMessageItem,
+  id: string,
+  renderCap: AssistantMessageRenderCap | undefined,
+) {
   return (
     block.id === id &&
     block.turnId === source.turnId &&
     block.timestamp.getTime() === source.timestamp.getTime() &&
     block.timelineCursor?.epoch === source.timelineCursor?.epoch &&
-    block.timelineCursor?.seq === source.timelineCursor?.seq
+    block.timelineCursor?.seq === source.timelineCursor?.seq &&
+    block.renderCap?.characters === renderCap?.characters &&
+    block.renderCap?.messageBytes === renderCap?.messageBytes
   );
+}
+
+/** The last row of a message, which also carries whatever its split dropped or capped. */
+function lastBlockRow(
+  source: AssistantMessageItem,
+  head: CappedAssistantMessage,
+  text: string,
+): { text: string; renderCap?: AssistantMessageRenderCap } {
+  if (head.capped) {
+    // The split drops the head's trailing whitespace; keep it before the rest.
+    const headTrailingSpace = /\s*$/.exec(head.text)?.[0] ?? "";
+    return {
+      text: text + headTrailingSpace + source.text.slice(head.text.length),
+      renderCap: { characters: text.length, messageBytes: getUtf8ByteLength(source.text) },
+    };
+  }
+  // The split drops trailing blank lines, including a line break followed only
+  // by the next line's indent. Keep them so the next append continues that line.
+  const trailingBlankLines = /\n\s*$/.exec(source.text)?.[0] ?? "";
+  return { text: text + trailingBlankLines };
 }
 
 /** Source messages reach plugins before any Markdown splitting or Overview grouping. */
@@ -89,6 +126,11 @@ export function createStreamPresentation() {
    * link reference definitions with the block that uses them, but a reference pointing
    * at a definition several blocks away renders as literal text. Streamed messages
    * always behaved this way; history now matches them.
+   *
+   * Each row applies the render cap on its own, so the cap alone does not bound a
+   * message: thousands of short paragraphs become thousands of rows that each pass it.
+   * Rows therefore come from the capped head only, and the last one holds the rest of
+   * the message behind its own cap, where Find can still expand it.
    */
   function nativeBlocks(item: StreamItem): StreamItem[] {
     if (item.kind === "user_message") return [presentUserMessage(item)];
@@ -97,11 +139,13 @@ export function createStreamPresentation() {
     if (cached) return cached;
     const previousSource = liveSources.get(item.id);
     const previous = previousSource && blocksBySource.get(previousSource);
+    const head = capAssistantMessageForRender(item.text);
     // Parse only the growing last block on append, as the old live reducer did.
-    // Canonical text replacements are parsed afresh instead of joining fragments.
-    const isAppend = previousSource && previous && item.text.startsWith(previousSource.text);
+    // Canonical text replacements and capped messages are parsed afresh instead.
+    const isAppend =
+      !head.capped && previousSource && previous && item.text.startsWith(previousSource.text);
     let prefix: AssistantMessageItem[] = [];
-    let growingText = item.text;
+    let growingText = head.text;
     if (isAppend) {
       prefix = previous.slice(0, -1);
       growingText =
@@ -114,16 +158,13 @@ export function createStreamPresentation() {
     const blocks = [...prefix];
     for (const [offset, text] of textBlocks.entries()) {
       const index = prefix.length + offset;
-      let blockText = text;
-      if (offset === textBlocks.length - 1) {
-        // The split drops trailing blank lines, including a line break followed only
-        // by the next line's indent. Keep them so the next append continues that line.
-        const trailingBlankLines = /\n\s*$/.exec(item.text)?.[0] ?? "";
-        blockText += trailingBlankLines;
-      }
+      const { text: blockText, renderCap } =
+        offset === textBlocks.length - 1
+          ? lastBlockRow(item, head, text)
+          : { text, renderCap: undefined };
       const existing = previous?.[index];
       const id = `${item.id}:block:${index}`;
-      if (existing?.text === blockText && isReusableBlock(existing, item, id)) {
+      if (existing?.text === blockText && isReusableBlock(existing, item, id, renderCap)) {
         blocks.push(existing);
         continue;
       }
@@ -133,6 +174,7 @@ export function createStreamPresentation() {
         blockGroupId: item.id,
         blockIndex: index,
         text: blockText,
+        ...(renderCap ? { renderCap } : {}),
       });
     }
     blocksBySource.set(item, blocks);

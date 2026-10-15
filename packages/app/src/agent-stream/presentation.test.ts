@@ -12,6 +12,10 @@ import {
 } from "@/types/stream";
 import { transformTimelineItem, type TimelineItemTransform } from "@/plugins/timeline/model";
 import { createStreamPresentation, getStreamItemMessageId } from "./presentation";
+import {
+  ASSISTANT_MESSAGE_RENDER_CHARACTER_LIMIT,
+  getUtf8ByteLength,
+} from "@/components/assistant-message-render-limit";
 import { buildAgentStreamRenderModel } from "./model";
 
 const runtime = {
@@ -347,6 +351,77 @@ describe("stream presentation through installed plugins", () => {
       },
     ]);
     expect(result.tail[0]!.id).not.toBe(messageId);
+  });
+
+  // Each row applies the render cap on its own, so without a cap on the message a reply
+  // of tiny paragraphs became one row per paragraph and exhausted the renderer.
+  it("builds rows only from the capped head of a message of many short paragraphs", () => {
+    const tail = "HIDDEN_TAIL";
+    const text = `Intro.${"\n\n<br>".repeat(31_982)}\n\n${tail}`;
+    const source = hydrateStreamState([{ event: assistant(text), timestamp: new Date(1000) }]);
+    const messageId = source[0]!.id;
+    const result = createStreamPresentation()({
+      ...presentationOptions,
+      tail: source,
+      head: [],
+      transform: undefined,
+    });
+    const messageRows = result.tail.filter((item) => item.kind === "assistant_message");
+    const last = messageRows[messageRows.length - 1]!;
+
+    expect(messageRows.every((row) => row.blockGroupId === messageId)).toBe(true);
+    expect(messageRows.length).toBeLessThan(ASSISTANT_MESSAGE_RENDER_CHARACTER_LIMIT / 6 + 2);
+    expect(messageRows.slice(0, -1).some((row) => row.renderCap)).toBe(false);
+    expect(last.renderCap).toEqual({
+      characters: expect.any(Number),
+      messageBytes: getUtf8ByteLength(text),
+    });
+    const rendered =
+      messageRows.slice(0, -1).reduce((sum, row) => sum + row.text.length, 0) +
+      last.renderCap!.characters;
+    expect(rendered).toBeLessThanOrEqual(ASSISTANT_MESSAGE_RENDER_CHARACTER_LIMIT);
+    // The rest of the message stays on the last row, where Find can still reveal it.
+    expect(last.text.endsWith(tail)).toBe(true);
+  });
+
+  it("keeps a capped single paragraph one row that holds the whole message", () => {
+    const text = `${"background ".repeat(3100)}tail-needle`;
+    const source = hydrateStreamState([{ event: assistant(text), timestamp: new Date(1000) }]);
+    const result = createStreamPresentation()({
+      ...presentationOptions,
+      tail: source,
+      head: [],
+      transform: undefined,
+    });
+    expect(result.tail).toMatchObject([
+      {
+        blockIndex: 0,
+        text,
+        renderCap: {
+          characters: ASSISTANT_MESSAGE_RENDER_CHARACTER_LIMIT,
+          messageBytes: getUtf8ByteLength(text),
+        },
+      },
+    ]);
+  });
+
+  it("splits a capped message the same way while it streams past the cap", () => {
+    const text = `Intro.${"\n\nshort".repeat(8_000)}`;
+    const harness = streamHarness();
+    const cut = ASSISTANT_MESSAGE_RENDER_CHARACTER_LIMIT - 10;
+    harness.send(assistant(text.slice(0, cut)));
+    const live = rows(harness.send(assistant(text.slice(cut))));
+    const hydrated = createStreamPresentation()({
+      ...presentationOptions,
+      tail: hydrateStreamState([{ event: assistant(text), timestamp: new Date(1000) }]),
+      head: [],
+      transform: undefined,
+    }).tail;
+    const shape = (items: StreamItem[]) =>
+      items.map((item) =>
+        item.kind === "assistant_message" ? [item.text, item.renderCap ?? null] : null,
+      );
+    expect(shape(live)).toEqual(shape(hydrated));
   });
 
   it("continues to stream inline reasoning with a stable plugin row", () => {

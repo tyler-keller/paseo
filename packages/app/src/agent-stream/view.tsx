@@ -735,6 +735,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
                   client={client}
                   spacing={layoutItem.assistantSpacing}
                   phase={layoutItem.phase}
+                  renderCap={item.renderCap}
                 />
               )}
             </ChatFindExpansion>
